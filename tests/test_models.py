@@ -9,9 +9,11 @@ from netbrain_mcp.models import (
     DeviceSummary,
     DiagnosisResult,
     Event,
+    GatewayInfo,
     LoginResponse,
     Neighbor,
     NetBrainResponse,
+    PathHop,
     PathResult,
 )
 
@@ -84,14 +86,18 @@ class TestDeviceConfig:
     def test_from_api_payload(self) -> None:
         data = {
             "hostname": "core-rtr-01",
-            "configType": "running",
-            "content": "interface GigabitEthernet0/0\n ip address 10.1.1.1 255.255.255.0",
-            "lastUpdated": "2026-03-15T10:30:00Z",
+            "configuration": "interface GigabitEthernet0/0\n ip address 10.1.1.1 255.255.255.0",
+            "time": "2026-03-15T10:30:00Z",
         }
         config = DeviceConfig.model_validate(data)
-        assert config.config_type == "running"
-        assert "GigabitEthernet" in config.content
-        assert config.last_updated == "2026-03-15T10:30:00Z"
+        assert config.hostname == "core-rtr-01"
+        assert "GigabitEthernet" in config.configuration
+        assert config.time == "2026-03-15T10:30:00Z"
+
+    def test_defaults(self) -> None:
+        config = DeviceConfig.model_validate({})
+        assert config.configuration == ""
+        assert config.time == ""
 
 
 class TestNeighbor:
@@ -99,67 +105,108 @@ class TestNeighbor:
         data = {
             "hostname": "sw-01",
             "interface": "Gi0/1",
-            "neighborHostname": "core-rtr-01",
-            "neighborInterface": "Gi0/0",
-            "neighborDeviceType": "Cisco Router",
-            "protocol": "CDP",
         }
         neighbor = Neighbor.model_validate(data)
-        assert neighbor.neighbor_hostname == "core-rtr-01"
-        assert neighbor.protocol == "CDP"
+        assert neighbor.hostname == "sw-01"
+        assert neighbor.interface == "Gi0/1"
+
+    def test_defaults(self) -> None:
+        neighbor = Neighbor.model_validate({})
+        assert neighbor.hostname == ""
+        assert neighbor.interface == ""
+
+
+class TestGatewayInfo:
+    def test_from_api_payload(self) -> None:
+        data = {
+            "gatewayName": "gw-01",
+            "type": "static",
+            "payload": '{"ip": "10.0.0.1"}',
+        }
+        gw = GatewayInfo.model_validate(data)
+        assert gw.gateway_name == "gw-01"
+        assert gw.type == "static"
+        assert gw.payload == '{"ip": "10.0.0.1"}'
+
+    def test_defaults(self) -> None:
+        gw = GatewayInfo.model_validate({})
+        assert gw.gateway_name == ""
+        assert gw.type == ""
+
+
+class TestPathHop:
+    def test_from_api_payload(self) -> None:
+        data = {
+            "hopId": "hop-1",
+            "srcDeviceName": "core-rtr-01",
+            "inboundInterface": "Gi0/0",
+            "mediaName": "10.1.1.0/24",
+            "dstDeviceName": "dist-sw-01",
+            "outboundInterface": "Gi0/1",
+            "nextHopIdList": ["hop-2", "hop-3"],
+        }
+        hop = PathHop.model_validate(data)
+        assert hop.hop_id == "hop-1"
+        assert hop.src_device_name == "core-rtr-01"
+        assert hop.dst_device_name == "dist-sw-01"
+        assert hop.next_hop_id_list == ["hop-2", "hop-3"]
 
 
 class TestPathResult:
     def test_with_hops(self) -> None:
         data = {
-            "taskId": "task-001",
+            "taskID": "task-001",
             "status": "Finished",
-            "hops": [
+            "hopList": [
                 {
-                    "hostname": "core-rtr-01",
-                    "ingressInterface": "Gi0/0",
-                    "egressInterface": "Gi0/1",
-                    "hopNumber": 1,
-                    "deviceType": "Router",
-                    "status": "forwarding",
+                    "hopId": "hop-1",
+                    "srcDeviceName": "core-rtr-01",
+                    "inboundInterface": "Gi0/0",
+                    "mediaName": "10.1.1.0/24",
+                    "dstDeviceName": "dist-sw-01",
+                    "outboundInterface": "Gi0/1",
+                    "nextHopIdList": ["hop-2"],
                 },
                 {
-                    "hostname": "dist-sw-01",
-                    "ingressInterface": "Gi0/0",
-                    "egressInterface": "",
-                    "hopNumber": 2,
-                    "deviceType": "Switch",
-                    "status": "destination",
+                    "hopId": "hop-2",
+                    "srcDeviceName": "dist-sw-01",
+                    "inboundInterface": "Gi0/0",
+                    "mediaName": "10.2.2.0/24",
+                    "dstDeviceName": "access-sw-01",
+                    "outboundInterface": "",
+                    "nextHopIdList": [],
                 },
             ],
         }
         result = PathResult.model_validate(data)
+        assert result.task_id == "task-001"
         assert result.status == "Finished"
-        assert len(result.hops) == 2
-        assert result.hops[0].hostname == "core-rtr-01"
-        assert result.hops[1].hop_number == 2
+        assert len(result.hop_list) == 2
+        assert result.hop_list[0].src_device_name == "core-rtr-01"
+        assert result.hop_list[1].dst_device_name == "access-sw-01"
 
     def test_failed_path(self) -> None:
         data = {
-            "taskId": "task-002",
+            "taskID": "task-002",
             "status": "Failed",
-            "hops": [],
+            "hopList": [],
             "failureReason": "No route found",
         }
         result = PathResult.model_validate(data)
         assert result.failure_reason == "No route found"
-        assert result.hops == []
+        assert result.hop_list == []
 
 
 class TestDiagnosisResult:
     def test_with_results(self) -> None:
         data = {
-            "taskId": "diag-001",
+            "taskID": "diag-001",
             "status": "Completed",
             "results": [{"check": "BGP status", "output": "All peers established"}],
             "mapUrl": "https://netbrain.example.com/map/123",
         }
         result = DiagnosisResult.model_validate(data)
+        assert result.task_id == "diag-001"
         assert result.status == "Completed"
         assert len(result.results) == 1
         assert result.map_url == "https://netbrain.example.com/map/123"
@@ -168,16 +215,31 @@ class TestDiagnosisResult:
 class TestEvent:
     def test_from_api_payload(self) -> None:
         data = {
-            "eventId": "evt-001",
-            "eventType": "ConfigChange",
-            "deviceHostname": "core-rtr-01",
-            "message": "Running config changed",
-            "timestamp": "2026-03-16T08:00:00Z",
-            "severity": "Warning",
+            "device": "core-rtr-01",
+            "event": "Interface Down",
+            "firstTime": "2026-03-16T08:00:00Z",
+            "lastTime": "2026-03-16T09:00:00Z",
+            "count": 3,
+            "acknowledged": False,
+            "status": True,
+            "executedBy": "admin",
+            "fromTask": "task-001",
+            "taskType": 1,
         }
         event = Event.model_validate(data)
-        assert event.event_type == "ConfigChange"
-        assert event.severity == "Warning"
+        assert event.device == "core-rtr-01"
+        assert event.event == "Interface Down"
+        assert event.first_time == "2026-03-16T08:00:00Z"
+        assert event.last_time == "2026-03-16T09:00:00Z"
+        assert event.count == 3
+        assert event.acknowledged is False
+        assert event.task_type == 1
+
+    def test_defaults(self) -> None:
+        event = Event.model_validate({})
+        assert event.device == ""
+        assert event.count == 0
+        assert event.acknowledged is False
 
 
 class TestChangeAnalysis:

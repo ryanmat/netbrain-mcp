@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -10,12 +11,12 @@ import httpx
 
 from netbrain_mcp.config import NetBrainSettings
 from netbrain_mcp.models import (
-    ChangeAnalysis,
     DeviceAttributes,
     DeviceConfig,
     DeviceSummary,
     DiagnosisResult,
     Event,
+    GatewayInfo,
     Neighbor,
     PathResult,
 )
@@ -117,7 +118,7 @@ class NetBrainClient:
         path: str,
         *,
         params: dict[str, Any] | None = None,
-        json: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
         retry_auth: bool = True,
     ) -> dict[str, Any]:
         """Make an authenticated API request with auto-retry on auth failure."""
@@ -127,7 +128,7 @@ class NetBrainClient:
             path,
             headers=self._auth_headers(),
             params=params,
-            json=json,
+            json=json_body,
         )
         resp.raise_for_status()
         body: dict[str, Any] = resp.json()
@@ -136,7 +137,9 @@ class NetBrainClient:
             logger.info("Auth expired, re-authenticating")
             self._token = None
             await self._login()
-            return await self._request(method, path, params=params, json=json, retry_auth=False)
+            return await self._request(
+                method, path, params=params, json_body=json_body, retry_auth=False
+            )
 
         self._check_status(body)
         return body
@@ -144,21 +147,23 @@ class NetBrainClient:
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return await self._request("GET", path, params=params)
 
-    async def _post(self, path: str, json: dict[str, Any] | None = None) -> dict[str, Any]:
-        return await self._request("POST", path, json=json)
+    async def _post(self, path: str, json_body: dict[str, Any] | None = None) -> dict[str, Any]:
+        return await self._request("POST", path, json_body=json_body)
 
-    async def _poll_task(self, result_path: str, task_id: str) -> dict[str, Any]:
-        """Poll an async task until completion or timeout."""
+    async def _poll_path_result(self, task_id: str) -> dict[str, Any]:
+        """Poll path calculation result until completion or timeout."""
         elapsed = 0.0
+        result_path = f"/ServicesAPI/API/V1/CMDB/Path/Calculation/{task_id}/Result"
         while elapsed < self._settings.poll_timeout:
-            resp = await self._get(f"{result_path}/{task_id}")
-            data = resp.get("data", {})
-            status = data.get("status", "")
-            if status in ("Finished", "Failed", "Error", "Completed"):
-                return data
-            await asyncio.sleep(self._settings.poll_interval)
-            elapsed += self._settings.poll_interval
-        raise NetBrainError(0, f"Task {task_id} timed out after {self._settings.poll_timeout}s")
+            try:
+                resp = await self._get(result_path)
+                return resp
+            except NetBrainError:
+                await asyncio.sleep(self._settings.poll_interval)
+                elapsed += self._settings.poll_interval
+        raise NetBrainError(
+            0, f"Path calculation {task_id} timed out after {self._settings.poll_timeout}s"
+        )
 
     @staticmethod
     def _check_status(body: dict[str, Any]) -> None:
@@ -177,21 +182,25 @@ class NetBrainClient:
     # -- Public API methods (called by MCP tools) --
 
     async def get_devices(
-        self, limit: int = 50, skip: int = 0, device_type: str = ""
+        self,
+        limit: int = 50,
+        skip: int = 0,
+        filter_json: dict[str, Any] | None = None,
     ) -> list[DeviceSummary]:
-        """List devices with optional pagination and type filter."""
-        params: dict[str, Any] = {"limit": limit, "skip": skip}
-        if device_type:
-            params["deviceTypeName"] = device_type
+        """List devices with optional pagination and filter."""
+        clamped_limit = max(10, min(limit, 100))
+        params: dict[str, Any] = {"limit": clamped_limit, "skip": skip, "version": 1}
+        if filter_json:
+            params["filter"] = json.dumps(filter_json)
         resp = await self._get("/ServicesAPI/API/V1/CMDB/Devices", params=params)
-        raw_devices = resp.get("data", {}).get("devices", [])
+        raw_devices = resp.get("devices", [])
         return [DeviceSummary.model_validate(d) for d in raw_devices]
 
-    async def search_devices(self, keyword: str, limit: int = 20) -> list[DeviceSummary]:
-        """Search devices by hostname keyword."""
-        params: dict[str, Any] = {"keyword": keyword, "limit": limit}
+    async def search_devices(self, hostname: str) -> list[DeviceSummary]:
+        """Search devices by hostname (case-insensitive match)."""
+        params: dict[str, Any] = {"hostname": hostname, "ignoreCase": True, "version": 1}
         resp = await self._get("/ServicesAPI/API/V1/CMDB/Devices", params=params)
-        raw_devices = resp.get("data", {}).get("devices", [])
+        raw_devices = resp.get("devices", [])
         return [DeviceSummary.model_validate(d) for d in raw_devices]
 
     async def get_device_attributes(self, hostname: str) -> DeviceAttributes:
@@ -200,99 +209,114 @@ class NetBrainClient:
             "/ServicesAPI/API/V1/CMDB/Devices/Attributes",
             params={"hostname": hostname},
         )
-        return DeviceAttributes.model_validate(resp.get("data", {}))
+        return DeviceAttributes.model_validate(resp)
 
-    async def get_device_config(self, hostname: str, config_type: str = "running") -> DeviceConfig:
-        """Get device configuration (running or startup)."""
+    async def get_device_config(self, hostname: str) -> DeviceConfig:
+        """Get device configuration from the data engine."""
         resp = await self._get(
-            f"/ServicesAPI/API/V1/CMDB/Devices/{hostname}/Configs",
-            params={"configType": config_type},
+            "/ServicesAPI/API/V1/CMDB/DataEngine/DeviceData/Configuration",
+            params={"hostname": hostname},
         )
-        return DeviceConfig.model_validate(resp.get("data", {}))
+        return DeviceConfig.model_validate(resp)
 
-    async def get_neighbors(self, hostname: str) -> list[Neighbor]:
-        """Get neighboring devices (CDP/LLDP)."""
-        resp = await self._get(f"/ServicesAPI/API/V1/CMDB/Topology/Devices/{hostname}/Neighbors")
-        raw_neighbors = resp.get("data", [])
+    async def get_neighbors(self, hostname: str, topo_type: int = 1) -> list[Neighbor]:
+        """Get neighboring devices."""
+        resp = await self._get(
+            "/ServicesAPI/API/V1/CMDB/Topology/Devices/Neighbors",
+            params={"hostname": hostname, "topoType": topo_type},
+        )
+        raw_neighbors = resp.get("neighbors", [])
         return [Neighbor.model_validate(n) for n in raw_neighbors]
+
+    async def _resolve_gateway(self, ip_or_host: str) -> GatewayInfo:
+        """Resolve the gateway for a given IP or hostname (path calc prerequisite)."""
+        resp = await self._get(
+            "/ServicesAPI/API/V1/CMDB/Path/Gateways",
+            params={"ipOrHost": ip_or_host},
+        )
+        gateways = resp.get("gatewayList", [])
+        if not gateways:
+            raise NetBrainError(0, f"No gateway found for {ip_or_host}")
+        return GatewayInfo.model_validate(gateways[0])
 
     async def calculate_path(
         self,
         source_ip: str,
-        destination_ip: str,
+        dest_ip: str,
         protocol: int = 4,
         source_port: int = 0,
-        destination_port: int = 0,
+        dest_port: int = 0,
+        is_live: bool = False,
     ) -> PathResult:
         """Calculate network path from source to destination. Blocks until result."""
+        gateway = await self._resolve_gateway(source_ip)
         resp = await self._post(
-            "/ServicesAPI/API/V1/Topology/Path",
-            json={
+            "/ServicesAPI/API/V1/CMDB/Path/Calculation",
+            json_body={
                 "sourceIP": source_ip,
-                "destinationIP": destination_ip,
-                "protocol": protocol,
                 "sourcePort": source_port,
-                "destinationPort": destination_port,
+                "sourceGateway": {
+                    "type": gateway.type,
+                    "gatewayName": gateway.gateway_name,
+                    "payload": gateway.payload,
+                },
+                "destIP": dest_ip,
+                "destPort": dest_port,
+                "protocol": protocol,
+                "isLive": is_live,
             },
         )
-        task_id = resp.get("data", {}).get("taskId", "")
+        task_id = resp.get("taskID", "")
         if not task_id:
-            return PathResult.model_validate(resp.get("data", {}))
-        data = await self._poll_task("/ServicesAPI/API/V1/Topology/Path/Result", task_id)
+            return PathResult.model_validate(resp)
+        data = await self._poll_path_result(task_id)
         return PathResult.model_validate(data)
 
     async def trigger_diagnosis(
         self,
         device_hostname: str,
-        runbook_name: str = "",
-        runbook_id: str = "",
         map_create_mode: int = 0,
+        stub_name: str = "",
     ) -> DiagnosisResult:
-        """Trigger a diagnosis on a device. Blocks until result."""
-        payload: dict[str, Any] = {"deviceHostname": device_hostname}
-        if runbook_name:
-            payload["runbookName"] = runbook_name
-        if runbook_id:
-            payload["runbookId"] = runbook_id
-        if map_create_mode:
-            payload["mapCreateMode"] = map_create_mode
-        resp = await self._post("/ServicesAPI/API/V1/Triggered/Diagnosis", json=payload)
-        task_id = resp.get("data", {}).get("taskId", "")
-        if not task_id:
-            return DiagnosisResult.model_validate(resp.get("data", {}))
-        data = await self._poll_task("/ServicesAPI/API/V1/Triggered/Diagnosis/Result", task_id)
-        return DiagnosisResult.model_validate(data)
-
-    async def get_diagnosis_result(self, task_id: str) -> DiagnosisResult:
-        """Get the result of a previously triggered diagnosis by task ID."""
-        resp = await self._get(f"/ServicesAPI/API/V1/Triggered/Diagnosis/Result/{task_id}")
-        return DiagnosisResult.model_validate(resp.get("data", {}))
+        """Trigger a diagnosis on a device. Fire-and-forget."""
+        payload: dict[str, Any] = {
+            "domain_setting": {
+                "tenant_id": self._settings.tenant,
+                "domain_id": self._settings.domain,
+            },
+            "basic_setting": {
+                "triggered_by": "netbrain-mcp",
+                "user": self._settings.username,
+                "device": device_hostname,
+                "stub_name": stub_name,
+                "stub_setting": {"mode": 0},
+            },
+            "map_setting": {
+                "map_create_mode": map_create_mode,
+            },
+        }
+        resp = await self._post("/ServicesAPI/API/V1/Triggers/Run", json_body=payload)
+        return DiagnosisResult.model_validate(resp)
 
     async def get_events(
         self,
-        hostname: str = "",
-        event_type: str = "",
-        limit: int = 50,
+        event_type: str = "1,2,3",
+        event_level: str = "0,1,2",
+        start_time: str = "",
+        end_time: str = "",
     ) -> list[Event]:
-        """Get recent network events, optionally filtered by device or type."""
-        params: dict[str, Any] = {"limit": limit}
-        if hostname:
-            params["hostname"] = hostname
-        if event_type:
-            params["eventType"] = event_type
-        resp = await self._get("/ServicesAPI/API/V1/Events", params=params)
-        raw_events = resp.get("data", {}).get("events", [])
+        """Get events from the NetBrain event console."""
+        params: dict[str, Any] = {
+            "eventType": event_type,
+            "eventLevel": event_level,
+        }
+        if start_time:
+            params["startTime"] = start_time
+        if end_time:
+            params["endTime"] = end_time
+        resp = await self._get("/ServicesAPI/API/V1/CMDB/EventConsole", params=params)
+        raw_events = resp.get("content", [])
         return [Event.model_validate(e) for e in raw_events]
-
-    async def get_change_analysis(
-        self, hostname: str, config_type: str = "running"
-    ) -> ChangeAnalysis:
-        """Get config change analysis (diff against baseline) for a device."""
-        resp = await self._get(
-            f"/ServicesAPI/API/V1/CMDB/Devices/{hostname}/ChangeAnalysis",
-            params={"configType": config_type},
-        )
-        return ChangeAnalysis.model_validate(resp.get("data", {}))
 
     # -- Lifecycle --
 

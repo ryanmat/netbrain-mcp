@@ -1,5 +1,5 @@
 # Description: Unit tests for the NetBrain API client.
-# Description: Tests auth lifecycle, error mapping, request handling, and poll logic.
+# Description: Tests auth lifecycle, error mapping, request handling, and gateway resolution.
 from __future__ import annotations
 
 from unittest.mock import AsyncMock
@@ -24,6 +24,7 @@ def settings() -> NetBrainSettings:
         username="testuser",
         password="testpass",
         domain="test-domain",
+        tenant="test-tenant",
     )
 
 
@@ -143,3 +144,29 @@ class TestLogout:
         client._http.delete = AsyncMock(side_effect=Exception("network error"))  # type: ignore[method-assign]
         await client._logout()
         assert client._token is None
+
+
+class TestResolveGateway:
+    @pytest.mark.asyncio
+    async def test_returns_first_gateway(self, client: NetBrainClient) -> None:
+        client._get = AsyncMock(  # type: ignore[method-assign]
+            return_value={
+                "statusCode": 790200,
+                "gatewayList": [
+                    {"gatewayName": "gw-01", "type": "static", "payload": "{}"},
+                    {"gatewayName": "gw-02", "type": "dynamic", "payload": "{}"},
+                ],
+            }
+        )
+        gw = await client._resolve_gateway("10.0.0.1")
+        assert gw.gateway_name == "gw-01"
+        assert gw.type == "static"
+
+    @pytest.mark.asyncio
+    async def test_raises_on_empty_gateway_list(self, client: NetBrainClient) -> None:
+        client._get = AsyncMock(  # type: ignore[method-assign]
+            return_value={"statusCode": 790200, "gatewayList": []}
+        )
+        with pytest.raises(NetBrainError) as exc_info:
+            await client._resolve_gateway("10.0.0.1")
+        assert "No gateway found" in exc_info.value.message

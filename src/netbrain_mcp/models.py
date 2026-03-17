@@ -72,9 +72,8 @@ class DeviceAttributes(BaseModel):
 
 class DeviceConfig(BaseModel):
     hostname: str = ""
-    config_type: str = Field(alias="configType", default="")
-    content: str = ""
-    last_updated: str = Field(alias="lastUpdated", default="")
+    configuration: str = ""
+    time: str = ""
 
     model_config = {"populate_by_name": True}
 
@@ -85,15 +84,19 @@ class DeviceConfig(BaseModel):
 class Neighbor(BaseModel):
     hostname: str = ""
     interface: str = ""
-    neighbor_hostname: str = Field(alias="neighborHostname", default="")
-    neighbor_interface: str = Field(alias="neighborInterface", default="")
-    neighbor_device_type: str = Field(alias="neighborDeviceType", default="")
-    protocol: str = ""
 
     model_config = {"populate_by_name": True}
 
 
 # -- Path --
+
+
+class GatewayInfo(BaseModel):
+    gateway_name: str = Field(alias="gatewayName", default="")
+    type: str = ""
+    payload: str = ""
+
+    model_config = {"populate_by_name": True}
 
 
 class PathRequest(BaseModel):
@@ -107,20 +110,21 @@ class PathRequest(BaseModel):
 
 
 class PathHop(BaseModel):
-    hostname: str = ""
-    ingress_interface: str = Field(alias="ingressInterface", default="")
-    egress_interface: str = Field(alias="egressInterface", default="")
-    hop_number: int = Field(alias="hopNumber", default=0)
-    device_type: str = Field(alias="deviceType", default="")
-    status: str = ""
+    hop_id: str = Field(alias="hopId", default="")
+    src_device_name: str = Field(alias="srcDeviceName", default="")
+    inbound_interface: str = Field(alias="inboundInterface", default="")
+    media_name: str = Field(alias="mediaName", default="")
+    dst_device_name: str = Field(alias="dstDeviceName", default="")
+    outbound_interface: str = Field(alias="outboundInterface", default="")
+    next_hop_id_list: list[str] = Field(alias="nextHopIdList", default_factory=list)
 
     model_config = {"populate_by_name": True}
 
 
 class PathResult(BaseModel):
-    task_id: str = Field(alias="taskId", default="")
+    task_id: str = Field(alias="taskID", default="")
     status: str = ""
-    hops: list[PathHop] = Field(default_factory=list)
+    hop_list: list[PathHop] = Field(alias="hopList", default_factory=list)
     failure_reason: str = Field(alias="failureReason", default="")
 
     model_config = {"populate_by_name": True}
@@ -132,14 +136,13 @@ class PathResult(BaseModel):
 class DiagnosisRequest(BaseModel):
     device_hostname: str = Field(alias="deviceHostname")
     map_create_mode: int = Field(alias="mapCreateMode", default=0)
-    runbook_id: str = Field(alias="runbookId", default="")
-    runbook_name: str = Field(alias="runbookName", default="")
+    stub_name: str = Field(alias="stubName", default="")
 
     model_config = {"populate_by_name": True}
 
 
 class DiagnosisResult(BaseModel):
-    task_id: str = Field(alias="taskId", default="")
+    task_id: str = Field(alias="taskID", default="")
     status: str = ""
     results: list[dict[str, Any]] = Field(default_factory=list)
     map_url: str = Field(alias="mapUrl", default="")
@@ -152,12 +155,16 @@ class DiagnosisResult(BaseModel):
 
 
 class Event(BaseModel):
-    event_id: str = Field(alias="eventId", default="")
-    event_type: str = Field(alias="eventType", default="")
-    device_hostname: str = Field(alias="deviceHostname", default="")
-    message: str = ""
-    timestamp: str = ""
-    severity: str = ""
+    device: str = ""
+    event: str = ""
+    first_time: str = Field(alias="firstTime", default="")
+    last_time: str = Field(alias="lastTime", default="")
+    count: int = 0
+    acknowledged: bool = False
+    status: bool = False
+    executed_by: str = Field(alias="executedBy", default="")
+    from_task: str = Field(alias="fromTask", default="")
+    task_type: int = Field(alias="taskType", default=0)
 
     model_config = {"populate_by_name": True}
 

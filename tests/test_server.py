@@ -22,7 +22,6 @@ class TestServerSetup:
             "get_neighbors",
             "calculate_path",
             "trigger_diagnosis",
-            "get_diagnosis_result",
             "get_events",
             "get_change_analysis",
             "search_devices",
@@ -32,4 +31,4 @@ class TestServerSetup:
     @pytest.mark.asyncio
     async def test_tool_count(self) -> None:
         tools = await mcp.list_tools()
-        assert len(tools) == 10
+        assert len(tools) == 9
